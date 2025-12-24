@@ -1,0 +1,149 @@
+# Django
+*.log
+*.pot
+*.pyc
+__pycache__/
+local_settings.py
+db.sqlite3
+media/
+staticfiles/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Python
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+*.egg
+*.egg-info/
+*.manifest
+*.spec
+.Python
+build/
+.eggs/
+.installed.cfg
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+
+# Installer logs
+pip-delete-this-directory.txt
+pip-log.txt
+
+# Unit test / coverage reports
+*.cover
+.cache
+.coverage
+.coverage.*
+.hypothesis/
+.pytest_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+nosetests.xml
+pytest.xml
+
+# pyenv
+.python-version
+
+# pytest
+.pytest_cache
+
+# Environments
+/local
+/.env
+/.envs
+.env.*
+.venv
+ENV/
+env.bak/
+env/
+venv
+venv.bak/
+venv/
+
+# Poetry
+poetry.lock  # Consider whether to include this - some teams do, some don't
+
+# Django migrations (BE CAREFUL WITH THIS - usually you want to keep migrations)
+# */migrations/*.py
+# !*/migrations/__init__.py
+
+# Misc
+.mypy_cache
+/staticfiles
+**/static/
+.cache
+.ruff_cache
+.mypy_cache
+
+# IDEs
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Project specific
+/uploads/
+/downloads/
+/tmp/
+
+# Docker (if you use it)
+.dockerignore
+Dockerfile
+docker-compose.yml  # Some teams commit this, some don't
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# macOS
+._*
+
+# Windows
+[Tt]humbs.db
+
+# Linux
+*~
+frontend/

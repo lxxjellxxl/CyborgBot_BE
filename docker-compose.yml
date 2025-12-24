@@ -1,0 +1,68 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:14.2-alpine
+    restart: unless-stopped
+    env_file:
+      - ./.envs/.production/.postgres
+    volumes:
+      - fra-production-postgresql-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  backend:
+    volumes:
+      - static:/opt/project/staticfiles
+      - media:/opt/project/media
+      - .:/opt/project
+    env_file:
+      - ./.envs/.production/.django
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      FRA_SETTINGS_LOCAL_SETTINGS_PATH: 'local/settings.prod.py'
+    command: gunicorn core.project.wsgi:application --bind 0.0.0.0:8000  # ADD THIS LINE
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    depends_on:
+      - backend
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+      - static:/usr/share/nginx/html/nibras-fe2/staticfiles
+      - media:/usr/share/nginx/html/nibras-fe2/media
+    networks:
+      - app-network
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
+
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+volumes:
+  fra-production-postgresql-data:
+    driver: local
+  static:
+  media:
+
+networks:
+  app-network:
+    driver: bridge

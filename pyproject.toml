@@ -1,0 +1,74 @@
+[tool.poetry]
+name = "KODORAT"
+version = "0.1.0"
+description = ""
+authors = ["Abdo <lxxjellxxl@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+pandas = "^2.0.0"
+python = "^3.12"
+djangorestframework = "^3.14.0"
+psycopg2 = "^2.9.9"
+django-filter = "^23.5"
+django-split-settings = "^1.2.0"
+pyyaml = "^6.0.1"
+django-cors-headers = "^4.3.1"
+gunicorn = "^21.2.0"
+whitenoise = "^6.6.0"
+djoser = "^2.2.2"
+pillow = "^10.2.0"
+openpyxl = "^3.1.2"
+django = "^5.2.5"
+django-extensions = "^4.1"
+pygraphviz = "^1.14"
+pydot = "^4.0.1"
+pydotplus = "^2.0.2"
+drf-yasg = "^1.21.7"
+django-dirtyfields = "*"
+django-sql-explorer = "^4.0"
+selenium = "^4.39.0"
+webdriver-manager = "^4.0.2"
+google-genai = "^1.56.0"
+channels = "^4.3.2"
+setuptools = "^80.9.0"
+pytz = "^2025.2"
+pandas-ta = "^0.4.71b0"
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "^3.6.2"
+colorlog = "^6.8.2"
+django-debug-toolbar = "^4.3.0"
+drf-spectacular = "^0.27.1"
+black = "^23.0.0"
+isort = "^5.12.0"
+flake8 = "^6.0.0"
+mypy = "^1.5.0"
+pytest = "^7.4.0"
+pytest-django = "^4.5.2"
+yapf = "^0.40.2"
+
+[tool.yapf]
+based_on_style = "facebook"
+column_limit = 119
+align_closing_bracket_with_visual_indent = true
+coalesce_brackets = true
+dedent_closing_brackets = true
+space_between_ending_comma_and_closing_bracket = false
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 119
+known_first_party = ["core"]
+force_single_line = false
+
+[tool.flake8]
+max-line-length = 119
+extend-ignore = "E203, W503, E501"
+exclude = ".git,__pycache__,*.pyc,migrations,staticfiles,media,dist,build,node_modules"
+per-file-ignores = "__init__.py:F401"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

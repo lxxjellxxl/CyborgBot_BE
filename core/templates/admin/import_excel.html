@@ -1,0 +1,12 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<h1>Import Students from Excel</h1>
+<div class="module">
+    <form method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <input type="submit" value="Import Students" class="default">
+        <a href="../" style="margin-left: 10px;">Cancel</a>
+    </form>
+</div>
+{% endblock %}

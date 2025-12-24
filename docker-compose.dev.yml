@@ -1,0 +1,19 @@
+version: '3.9'
+
+services:
+
+  db:
+    image: postgres:14.2-alpine
+    restart: unless-stopped
+    ports:
+      - '5432:5432'
+    environment:
+      POSTGRES_DB: fra
+      POSTGRES_USER: fra
+      POSTGRES_PASSWORD: fra
+    volumes:
+      - fra-postgresql-data:/var/lib/postgresql/data
+
+volumes:
+  fra-postgresql-data:
+    driver: local

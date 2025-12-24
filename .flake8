@@ -1,0 +1,18 @@
+[flake8]
+ignore = C101,D403,F403,F405,I100,I201,W503,W504,A005,A003,E501,E126,E126,E251,E123,C901,E731
+exclude =
+    .git,
+    __pycache__,
+    .mypy_cache,
+    venv,
+    .envs,
+    **/migrations/*
+filename = *.py
+accept-encodings = utf-8
+inline-quotes = single
+max-complexity = 12
+max-linenumber = 500
+max-line-length = 119
+multiline-quotes = double
+per-file-ignores =
+    core/project/settings/templates/settings.dev.py:F821

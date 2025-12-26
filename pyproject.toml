@@ -34,6 +34,7 @@ channels = "^4.3.2"
 setuptools = "^80.9.0"
 pytz = "^2025.2"
 pandas-ta = "^0.4.71b0"
+python-dotenv = "^1.2.1"
 
 [tool.poetry.group.dev.dependencies]
 pre-commit = "^3.6.2"

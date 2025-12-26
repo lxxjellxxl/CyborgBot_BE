@@ -24,26 +24,25 @@ from .history_manager import sync_trade_history
 # CONSTANTS
 CHART_BUFFER = { "h1": [], "m15": [], "m5": [] }
 SCORES_FILE = os.path.join(settings.BASE_DIR, "persona_scores.json")
-CACHED_SCORES = {"WISE": 0, "RECKLESS": 0, "ANALYST": 0} # RAM Cache
+CACHED_SCORES = {"WISE": 0, "RECKLESS": 0, "ANALYST": 0} 
 
-# --- HELPER: Prevent KeyErrors (Fixes 'CLOSE' crash) ---
 def sanitize_candle(candle):
-    """Ensures candle keys are always lowercase"""
     return {k.lower(): v for k, v in candle.items()}
 
-# --- SCORING SYSTEM ---
-def update_persona_scores(closed_trades):
+def update_persona_scores(account_id):
+    """
+    Recalculates scores from scratch based on the last 50 trades.
+    Prevents the 'infinite counting' bug.
+    """
     global CACHED_SCORES
     
-    # 1. Load existing or start fresh
-    if not os.path.exists(SCORES_FILE):
-        scores = {"WISE": 0, "RECKLESS": 0, "ANALYST": 0}
-    else:
-        try:
-            with open(SCORES_FILE, 'r') as f: scores = json.load(f)
-        except: scores = {"WISE": 0, "RECKLESS": 0, "ANALYST": 0}
+    # 1. Start Fresh (Reset to 0)
+    scores = {"WISE": 0, "RECKLESS": 0, "ANALYST": 0}
 
-    # 2. Update logic
+    # 2. Fetch actual history from DB (Last 50 closed trades)
+    # This gives us the "Current Form" of the personas
+    closed_trades = TradePosition.objects.filter(account_id=account_id, is_closed=True).order_by('-close_time')[:50]
+
     for t in closed_trades:
         try:
             profit = float(t.profit)
@@ -60,19 +59,27 @@ def update_persona_scores(closed_trades):
                 except: pass
 
             for v in voters:
+                # Normalize names
                 if v == "RACER": v = "RECKLESS"
                 if v == "NORMAL": v = "ANALYST"
+                
                 if v in scores:
-                    if profit > 0: scores[v] += 1
-                    else: scores[v] -= 1
+                    if profit > 0: 
+                        scores[v] += 1
+                    else: 
+                        # Only penalize if it's a real loss (ignore break-even 0.00)
+                        if profit < -0.05:
+                            scores[v] -= 1
         except: pass
     
-    # 3. Save to Disk & RAM
-    with open(SCORES_FILE, 'w') as f: json.dump(scores, f)
+    # 3. Save purely based on this fresh calculation
+    try:
+        with open(SCORES_FILE, 'w') as f: json.dump(scores, f)
+    except: pass
+    
     CACHED_SCORES = scores
     return scores
 
-# --- MAIN ENGINE ---
 def start_trading_loop(driver, account_id, stop_check_func, log_func):
     layout = Layout()
     layout.split_column(Layout(name="main", size=20), Layout(name="footer", size=10))
@@ -82,15 +89,13 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
     last_history_sync = 0
     last_ui_update = 0
     last_trend_sync = 0
+    last_verbose_log = 0 
     
     START_TIME = time.time()
     WARMUP_SECONDS = 60 
-    
     has_synced_once = False 
 
-    # --- INSTANT KILL HELPER ---
     def smart_sleep(seconds):
-        """Sleeps for 'seconds' but checks Stop Signal every 0.1s"""
         end_time = time.time() + seconds
         while time.time() < end_time:
             if stop_check_func(account_id): return True 
@@ -107,217 +112,183 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
             )
         except: pass
 
-    # Initialize Cache on Startup
-    update_persona_scores([]) 
-
-    dash_log(account_id, "🚀 Bot Engine Started. Warming up (60s)...")
+    update_persona_scores(account_id) 
+    dash_log(account_id, "🚀 Bot Engine Started. Syncing state...")
 
     with Live(layout, refresh_per_second=2, screen=True):
         while True:
-            # 1. Immediate Check
             if stop_check_func(account_id): 
                 dash_log(account_id, "🛑 STOP SIGNAL RECEIVED.")
                 break
             
             try:
-                # ---------------------------------------------------------
-                # 1. UI UPDATES (Optimized)
-                # ---------------------------------------------------------
+                # 1. UI UPDATES
                 if time.time() - last_ui_update > 2:
                     metrics = get_account_metrics(driver)
-                    
-                    # Send Cache directly (Don't read file)
-                    async_to_sync(channel_layer.group_send)(
-                        "bot_updates", 
-                        {"type": "send_update", "data": {
-                            "type": "balance_update", 
-                            "balance": metrics.get('balance', 0.0), 
-                            "equity": metrics.get('equity', 0.0),
-                            "scores": CACHED_SCORES 
-                        }}
-                    )
-                    
+                    async_to_sync(channel_layer.group_send)("bot_updates", {"type": "send_update", "data": {"type": "balance_update", "balance": metrics.get('balance', 0.0), "equity": metrics.get('equity', 0.0), "scores": CACHED_SCORES}})
                     if metrics.get('balance', 0) > 0 and not has_synced_once:
                         dash_log(account_id, f"✅ Connected. Balance: ${metrics['balance']}")
                         has_synced_once = True
-                    
                     last_ui_update = time.time()
 
                 if not has_synced_once:
                     if smart_sleep(1): break 
                     continue
                 
-                # ---------------------------------------------------------
-                # 2. TREND SYNC (Multi-Timeframe)
-                # ---------------------------------------------------------
-                is_time = (time.time() - last_trend_sync > 900)
-                is_unknown = (MTF_CONTEXT.get("h1") == "UNKNOWN")
-                
-                if is_time or is_unknown:
+                # 2. TREND SYNC (IMPROVED CHART PUSH)
+                if (time.time() - last_trend_sync > 900) or (MTF_CONTEXT.get("h1") == "UNKNOWN"):
+                    last_trend_sync = time.time() 
+                    dash_log(account_id, "🔄 Syncing Trends (H1/M15)...")
                     try:
-                        last_trend_sync = time.time() 
-                        dash_log(account_id, "🔄 Syncing Trends...")
+                        updated_charts = {}
+                        for tf, label in [("1 hour", "h1"), ("15 minutes", "m15")]:
+                            if switch_timeframe(driver, tf, dash_log, account_id):
+                                smart_sleep(3)
+                                candles = [sanitize_candle(c) for c in parse_candles(driver)]
+                                if candles:
+                                    CHART_BUFFER[label] = candles
+                                    trend = "BULLISH" if candles[-1]['close'] > candles[-1]['open'] else "BEARISH"
+                                    MTF_CONTEXT[label] = trend
+                                    updated_charts[f"candles_{label}"] = candles
+                                    dash_log(account_id, f"📈 {label.upper()} Trend: {trend}")
                         
-                        # H1 Check
-                        if switch_timeframe(driver, "1 hour", dash_log, account_id):
-                            if smart_sleep(3): break
-                            h1 = [sanitize_candle(c) for c in parse_candles(driver)] # Safe parsing
-                            if h1 and len(h1) > 10: 
-                                CHART_BUFFER["h1"] = h1
-                                MTF_CONTEXT["h1"] = "BULLISH" if h1[-1]['close'] > h1[-1]['open'] else "BEARISH"
-                        
-                        # M15 Check
-                        if switch_timeframe(driver, "15 minutes", dash_log, account_id):
-                            if smart_sleep(3): break
-                            m15 = [sanitize_candle(c) for c in parse_candles(driver)] # Safe parsing
-                            if m15 and len(m15) > 10:
-                                CHART_BUFFER["m15"] = m15
-                                MTF_CONTEXT["m15"] = "BULLISH" if m15[-1]['close'] > m15[-1]['open'] else "BEARISH"
-                        
-                        # Reset to M5
-                        switch_timeframe(driver, "5 minutes", dash_log, account_id)
-                        if smart_sleep(3): break
-                        
-                    except Exception as e:
-                        dash_log(account_id, f"⚠️ Trend Sync Failed: {str(e)[:20]}")
-                        # Don't break loop, just skip trend update
-                        switch_timeframe(driver, "5 minutes", dash_log, account_id)
+                        # --- FORCE PUSH CHARTS NOW ---
+                        if updated_charts:
+                            async_to_sync(channel_layer.group_send)(
+                                "bot_updates",
+                                {"type": "send_update", "data": {
+                                    "type": "chart_update", # New Event Type
+                                    **updated_charts
+                                }}
+                            )
 
-                # ---------------------------------------------------------
-                # 3. ANALYSIS & CONTEXT
-                # ---------------------------------------------------------
-                # Safe Parsing for M5
+                        switch_timeframe(driver, "5 minutes", dash_log, account_id)
+                        smart_sleep(3)
+                    except Exception as e:
+                        dash_log(account_id, f"⚠️ Trend Sync Failed: {e}")
+
+                # 3. ANALYSIS
                 raw_m5 = parse_candles(driver)
                 if not raw_m5:
-                    if smart_sleep(2): break
+                    dash_log(account_id, "⚠️ No M5 Candles found! Retrying...")
+                    smart_sleep(2)
                     continue 
                 
-                candles_m5 = [sanitize_candle(c) for c in raw_m5] # Fixes 'CLOSE' error
-                
+                candles_m5 = [sanitize_candle(c) for c in raw_m5]
                 CHART_BUFFER["m5"] = candles_m5
                 ask_price = get_real_price(driver)
                 
-                # Active Trade Context
+                # RESTART-PROOF CONTEXT
                 active_trades_ui = get_active_positions(driver)
                 trade_context = None
                 
-                if len(active_trades_ui) > 0:
+                if active_trades_ui:
                     t = active_trades_ui[0]
-                    entry = t.get('open_price') or t.get('entry') or t.get('price') or "0.00"
                     trade_context = {
-                        "direction": t.get('direction', 'BUY'), 
-                        "entry_price": entry,
+                        "direction": t.get('direction', 'BUY').upper(), 
+                        "entry_price": t.get('open_price') or t.get('entry') or "0.00",
                         "current_pnl": t.get('profit', '0.00')
                     }
 
-                decision = get_market_decision(
-                    ask_price, 
-                    MTF_CONTEXT, 
-                    candles_m5, 
-                    get_recent_history(account_id),
-                    active_trade=trade_context
-                )
+                decision = get_market_decision(ask_price, MTF_CONTEXT, candles_m5, get_recent_history(account_id), active_trade=trade_context)
 
-                # Push Analysis to UI
-                async_to_sync(channel_layer.group_send)(
-                    "bot_updates",
-                    {"type": "send_update", "data": {
-                        "type": "analysis_update", 
-                        "market_trend": MTF_CONTEXT.get('h1', 'UNKNOWN'), 
-                        "decision_data": decision,
-                        "candles_m5": CHART_BUFFER["m5"][-50:],
-                        "candles_h1": CHART_BUFFER["h1"][-30:],
-                        "candles_m15": CHART_BUFFER["m15"][-30:],
-                        "price": ask_price
-                    }}
-                )
+                # --- VERBOSE LOGGING ---
+                if time.time() - last_verbose_log > 10:
+                    reason_short = decision.get('reason', '').split('|')[0] if decision.get('reason') else 'No Reason'
+                    votes = decision.get('reason', '').replace('\n', ' ')
+                    if trade_context:
+                         dash_log(account_id, f"👀 MONITOR: PnL {trade_context['current_pnl']} | Council: {votes}")
+                    else:
+                         dash_log(account_id, f"🧠 THINKING: {votes}")
+                    last_verbose_log = time.time()
 
-                # ---------------------------------------------------------
-                # 4. WARMUP & EXECUTION
-                # ---------------------------------------------------------
+                # --- OPTIMIZED UPDATE: NO H1/M15 HERE ---
+                async_to_sync(channel_layer.group_send)("bot_updates", {"type": "send_update", "data": {
+                    "type": "analysis_update", 
+                    "market_trend": MTF_CONTEXT.get('h1', 'UNKNOWN'), 
+                    "decision_data": decision,
+                    "candles_m5": CHART_BUFFER["m5"][-50:], 
+                    "price": ask_price
+                }})
+
                 if (time.time() - START_TIME) < WARMUP_SECONDS:
                     layout["main"].update(Panel(f"WARMING UP: {int(WARMUP_SECONDS - (time.time() - START_TIME))}s left...", title="Status"))
-                    if smart_sleep(1): break
+                    smart_sleep(1)
                     continue
 
+                # 5. EXECUTION
                 is_open = len(active_trades_ui) > 0
                 
-                # A. TRAILING STOP
+                # A. EMERGENCY BREAK (TRAILING STOP)
                 if is_open and ask_price != "0.00":
                     db_trades = TradePosition.objects.filter(account_id=account_id, is_closed=False)
                     for db_trade in db_trades:
                         mod_signal = apply_emergency_break(db_trade, ask_price)
                         if mod_signal:
-                            dash_log(account_id, f"🚨 TRAILING STOP: {db_trade.ticket_id}")
-                            success = execute_trade_modification(driver, mod_signal, dash_log, account_id)
-                            if success:
+                            if execute_trade_modification(driver, mod_signal, dash_log, account_id):
                                 db_trade.sl = mod_signal['sl']
                                 db_trade.save()
-                                dash_log(account_id, f"✅ SL Updated to {mod_signal['sl']}")
+                                dash_log(account_id, f"🚨 SL Adjusted to {mod_signal['sl']}")
 
-                # B. SCALP LOGIC
-                if is_open:
-                    try:
-                        t = active_trades_ui[0]
-                        raw_pnl = t.get('profit', '0').replace('$', '').replace(',', '').strip()
-                        pnl = float(raw_pnl)
-                        if pnl > 1.00 and decision['action'] == "HOLD":
-                             dash_log(account_id, f"💰 Scalping profit (${pnl}) on Neutral Council.")
-                             if close_current_trade(driver, dash_log, account_id):
-                                 if smart_sleep(2): break
-                                 continue
-                    except: pass
-
-                # C. REVERSAL LOGIC
+                # B. STRATEGIC BREAK & REVERSAL
                 if is_open:
                     t = active_trades_ui[0]
-                    curr_dir = t.get('direction', 'BUY')
-                    ai_signal = decision['action']
-                    if (curr_dir == "BUY" and ai_signal == "SELL") or \
-                       (curr_dir == "SELL" and ai_signal == "BUY"):
-                        dash_log(account_id, f"🔄 REVERSAL: {curr_dir} -> {ai_signal}. Closing now.")
-                        if close_current_trade(driver, dash_log, account_id):
-                            dash_log(account_id, "✅ Position Closed.")
-                            if smart_sleep(2): break
-                            continue 
-                
+                    curr_dir = t.get('direction', 'BUY').upper()
+                    ai_signal = decision['action'].upper()
+                    try:
+                        pnl = float(t.get('profit', '0').replace('$', '').replace(',', '').strip())
+                        is_opposite = (curr_dir == "BUY" and ai_signal == "SELL") or (curr_dir == "SELL" and ai_signal == "BUY")
+                        
+                        if is_opposite:
+                            dash_log(account_id, f"⚠️ MUTINY: PnL {pnl} | Council wants {ai_signal} vs Current {curr_dir}")
+                        
+                        if pnl > 5.00 and is_opposite:
+                            dash_log(account_id, f"🎯 STRATEGIC BREAK: Locking in ${pnl}. Council flipped to {ai_signal}.")
+                            if close_current_trade(driver, dash_log, account_id):
+                                smart_sleep(2)
+                                continue
+                        
+                        if is_opposite and pnl < 0:
+                            dash_log(account_id, f"🔄 REVERSAL detected. Flipping {curr_dir} to {ai_signal}.")
+                            if close_current_trade(driver, dash_log, account_id):
+                                smart_sleep(2)
+                                continue
+                    except Exception as e:
+                        dash_log(account_id, f"⚠️ PnL Parse Error: {e}")
+
                 # D. OPEN NEW TRADE
                 if not is_open and ask_price != "0.00":
                     if decision['action'] in ["BUY", "SELL"]:
-                        dash_log(account_id, f"⚡ Council Decision: {decision['action']}")
+                        dash_log(account_id, f"⚡ ATTEMPTING {decision['action']} | SL: {decision['sl']} | TP: {decision['tp']}")
                         if navigate_order_panel_to_gold(driver, account_id, dash_log):
                             if place_market_order(driver, decision['action'], decision['sl'], decision['tp'], dash_log, account_id):
-                                save_trade_to_db(
-                                    account_id, 
-                                    decision['action'], 
-                                    ask_price, 
-                                    decision['sl'], 
-                                    decision['tp'], 
-                                    decision['reason'], 
-                                    decision.get('voters', ""), # Pass voters string here
-                                    MTF_CONTEXT
-                                )
-                                dash_log(account_id, "✅ Trade Executed")
+                                voters = decision.get('voters', [])
+                                voters_str = ",".join(voters) if isinstance(voters, list) else str(voters)
+                                save_trade_to_db(account_id, decision['action'], ask_price, decision['sl'], decision['tp'], decision['reason'], voters_str, MTF_CONTEXT)
+                                dash_log(account_id, f"✅ Trade Executed: {decision['action']}")
                                 last_history_sync = 0
+                            else:
+                                dash_log(account_id, "❌ Order Placement Failed (Check Navigator Logs)")
+                        else:
+                            dash_log(account_id, "❌ Navigation Failed (Could not find Gold)")
 
-                # ---------------------------------------------------------
                 # 6. HISTORY & SCORING
-                # ---------------------------------------------------------
                 if time.time() - last_history_sync > 30: 
                     sync_trade_history(driver, account_id, dash_log)
                     
-                    # Update scores from DB, write to Disk + Cache
-                    recent_closed = TradePosition.objects.filter(account_id=account_id, is_closed=True).order_by('-close_time')[:10]
-                    update_persona_scores(recent_closed)
+                    # OLD LINE (DELETE THIS):
+                    # recent_closed = TradePosition.objects.filter(...)...[:10]
+                    # update_persona_scores(recent_closed)
+                    
+                    # NEW LINE (ADD THIS):
+                    update_persona_scores(account_id)
                     
                     last_history_sync = time.time()
 
                 layout["main"].update(Panel(f"Price: {ask_price} | Council: {decision.get('action')}", title="Live"))
                 layout["footer"].update(Panel("\n".join(local_logs), title="Log"))
-                
-                if smart_sleep(1): break
+                smart_sleep(1)
 
             except Exception as e:
                 dash_log(account_id, f"⚠️ Loop Error: {str(e)[:30]}")
-                # Wait safely and retry
-                if smart_sleep(2): break
+                smart_sleep(2)

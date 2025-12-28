@@ -235,42 +235,87 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
                     t = active_trades_ui[0]
                     curr_dir = t.get('direction', 'BUY').upper()
                     ai_signal = decision['action'].upper()
+                    
                     try:
-                        pnl = float(t.get('profit', '0').replace('$', '').replace(',', '').strip())
+                        # --- ROBUST PNL PARSING ---
+                        raw_pnl = t.get('profit', '0')
+                        clean_pnl = raw_pnl.replace('$', '').replace(',', '') \
+                                           .replace('\u2009', '').replace('\xa0', '') \
+                                           .replace('−', '-').replace(' ', '').strip()
+                        pnl = float(clean_pnl)
+                        # ---------------------------
+
                         is_opposite = (curr_dir == "BUY" and ai_signal == "SELL") or (curr_dir == "SELL" and ai_signal == "BUY")
                         
-                        if is_opposite:
-                            dash_log(account_id, f"⚠️ MUTINY: PnL {pnl} | Council wants {ai_signal} vs Current {curr_dir}")
-                        
+                        # 1. HARD STOP LOSS (The Fix)
+                        # If we lose more than $15 (or your limit), CLOSE IMMEDIATELY.
+                        # We do NOT care what the Council says.
+                        if pnl < -15.00: 
+                            dash_log(account_id, f"🛑 HARD STOP: PnL is {pnl}. Closing to prevent disaster.")
+                            if close_current_trade(driver, dash_log, account_id):
+                                smart_sleep(2)
+                                continue
+
+                        # 2. Strategic Profit Take (Lock in Gains)
                         if pnl > 5.00 and is_opposite:
                             dash_log(account_id, f"🎯 STRATEGIC BREAK: Locking in ${pnl}. Council flipped to {ai_signal}.")
                             if close_current_trade(driver, dash_log, account_id):
                                 smart_sleep(2)
                                 continue
                         
-                        if is_opposite and pnl < 0:
-                            dash_log(account_id, f"🔄 REVERSAL detected. Flipping {curr_dir} to {ai_signal}.")
+                        # 3. Reversal (Only if Council flips)
+                        if is_opposite and pnl < -2.00:
+                            dash_log(account_id, f"🔄 REVERSAL: Council flipped to {ai_signal}. Closing current trade.")
                             if close_current_trade(driver, dash_log, account_id):
                                 smart_sleep(2)
                                 continue
+
                     except Exception as e:
                         dash_log(account_id, f"⚠️ PnL Parse Error: {e}")
 
                 # D. OPEN NEW TRADE
                 if not is_open and ask_price != "0.00":
                     if decision['action'] in ["BUY", "SELL"]:
-                        dash_log(account_id, f"⚡ ATTEMPTING {decision['action']} | SL: {decision['sl']} | TP: {decision['tp']}")
+                        
+                        # --- 1. CONVERSION LOGIC (Price Gap -> Pips) ---
+                        current_p = float(ask_price)
+                        sl_level = float(decision['sl'])
+                        tp_level = float(decision['tp'])
+                        
+                        # Calculate the Dollar Gap (e.g., $7.50)
+                        raw_sl_gap = abs(current_p - sl_level)
+                        raw_tp_gap = abs(current_p - tp_level)
+                        
+                        # CONVERT TO PIPS (Critical for Gold)
+                        # Standard XAUUSD: $1.00 move = 10 Pips (usually)
+                        # If Broker wants "75" for a $7.50 move, we multiply by 10.
+                        sl_pips = round(raw_sl_gap * 10, 1) 
+                        tp_pips = round(raw_tp_gap * 10, 1)
+                        # ---------------------------------------------
+
+                        dash_log(account_id, f"⚡ ATTEMPTING {decision['action']} | Gap: ${round(raw_sl_gap, 2)} -> Sending {sl_pips} Pips")
+                        
                         if navigate_order_panel_to_gold(driver, account_id, dash_log):
-                            if place_market_order(driver, decision['action'], decision['sl'], decision['tp'], dash_log, account_id):
+                            # Pass the calculated PIPS (e.g., 75) not the GAP (7.5)
+                            if place_market_order(driver, decision['action'], sl_pips, tp_pips, dash_log, account_id):
+                                
+                                # --- 2. PREVENT SPAM (The Machine Gun Fix) ---
+                                # Force the bot to wait 5 seconds for the table to update
+                                dash_log(account_id, "✅ Trade Sent. Waiting for broker to update...")
+                                time.sleep(5) 
+                                
+                                # Manually flag as open so we don't buy again in the next split second
+                                active_trades_ui = [{"temp": "true"}] 
+                                
+                                # Save to DB
                                 voters = decision.get('voters', [])
                                 voters_str = ",".join(voters) if isinstance(voters, list) else str(voters)
                                 save_trade_to_db(account_id, decision['action'], ask_price, decision['sl'], decision['tp'], decision['reason'], voters_str, MTF_CONTEXT)
-                                dash_log(account_id, f"✅ Trade Executed: {decision['action']}")
                                 last_history_sync = 0
                             else:
-                                dash_log(account_id, "❌ Order Placement Failed (Check Navigator Logs)")
+                                dash_log(account_id, "❌ Order Placement Failed")
                         else:
-                            dash_log(account_id, "❌ Navigation Failed (Could not find Gold)")
+                            dash_log(account_id, "❌ Navigation Failed")
 
                 # 6. HISTORY & SCORING
                 if time.time() - last_history_sync > 30: 

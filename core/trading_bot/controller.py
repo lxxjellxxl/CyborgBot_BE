@@ -207,21 +207,20 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
 
                 # --- VERBOSE LOGGING ---
                 if time.time() - last_verbose_log > 10:
-                    # 1. Extract Situation Data
                     snapshot = decision.get('snapshot', {})
                     rsi = snapshot.get('rsi', '--')
-                    h1 = MTF_CONTEXT.get('h1', 'UNK')
+                    
+                    # UPDATE THIS PART to show M15
+                    h1_trend = MTF_CONTEXT.get('h1', 'UNK')
+                    m15_trend = MTF_CONTEXT.get('m15', 'UNK')
+                    trends_display = f"H1:{h1_trend[:4]} M15:{m15_trend[:4]}" # Shorten to 4 chars (BULL/BEAR)
                     
                     votes = decision.get('reason', '').replace('\n', ' ')
                     
-                    # 2. Log based on Context
                     if trade_context:
-                         # MONITORING: Show PnL + Price
-                         dash_log(account_id, f"👀 MONITOR: PnL {trade_context['current_pnl']} | Price {ask_price} | {votes}")
+                         dash_log(account_id, f"👀 MONITOR: PnL {trade_context['current_pnl']} | {trends_display} | {votes}")
                     else:
-                         # THINKING: Show Situation (RSI + Trend)
-                         # This tells you WHY they are holding (e.g., "RSI is 55" = Neutral)
-                         dash_log(account_id, f"🧠 THINKING: Price {ask_price} | RSI {rsi} | H1 {h1} | {votes}")
+                         dash_log(account_id, f"🧠 THINKING: Price {ask_price} | RSI {rsi} | {trends_display} | {votes}")
                     
                     last_verbose_log = time.time()
 

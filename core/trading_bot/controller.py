@@ -135,20 +135,31 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
                     if smart_sleep(1): break 
                     continue
                 
-                # 2. TREND SYNC (IMPROVED CHART PUSH)
-                if (time.time() - last_trend_sync > 900) or (MTF_CONTEXT.get("h1") == "UNKNOWN"):
-                    last_trend_sync = time.time() 
+                # 2. TREND SYNC (FIXED: THROTTLED RETRY)
+                # Logic: Sync if 15 mins passed OR (if Trend is Unknown AND 60 seconds have passed since last try)
+                is_scheduled = (time.time() - last_trend_sync > 900)
+                is_retry = (MTF_CONTEXT.get("h1") == "UNKNOWN" and time.time() - last_trend_sync > 60)
+                
+                if is_scheduled or is_retry:
+                    last_trend_sync = time.time() # Reset timer immediately to prevent loop spam
+                    
                     dash_log(account_id, "🔄 Syncing Trends (H1/M15)...")
                     try:
                         updated_charts = {}
                         for tf, label in [("1 hour", "h1"), ("15 minutes", "m15")]:
                             if switch_timeframe(driver, tf, dash_log, account_id):
                                 smart_sleep(3)
-                                candles = [sanitize_candle(c) for c in parse_candles(driver)]
-                                if candles:
+                                # Sanitize and Parse
+                                raw_candles = parse_candles(driver)
+                                if raw_candles:
+                                    candles = [sanitize_candle(c) for c in raw_candles]
                                     CHART_BUFFER[label] = candles
-                                    trend = "BULLISH" if candles[-1]['close'] > candles[-1]['open'] else "BEARISH"
+                                    
+                                    # Determine Trend
+                                    last_c = candles[-1]
+                                    trend = "BULLISH" if last_c['close'] > last_c['open'] else "BEARISH"
                                     MTF_CONTEXT[label] = trend
+                                    
                                     updated_charts[f"candles_{label}"] = candles
                                     dash_log(account_id, f"📈 {label.upper()} Trend: {trend}")
                         
@@ -157,13 +168,15 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
                             async_to_sync(channel_layer.group_send)(
                                 "bot_updates",
                                 {"type": "send_update", "data": {
-                                    "type": "chart_update", # New Event Type
+                                    "type": "chart_update", 
                                     **updated_charts
                                 }}
                             )
 
+                        # ALWAYS RETURN TO M5
                         switch_timeframe(driver, "5 minutes", dash_log, account_id)
                         smart_sleep(3)
+                        
                     except Exception as e:
                         dash_log(account_id, f"⚠️ Trend Sync Failed: {e}")
 
@@ -194,12 +207,22 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
 
                 # --- VERBOSE LOGGING ---
                 if time.time() - last_verbose_log > 10:
-                    reason_short = decision.get('reason', '').split('|')[0] if decision.get('reason') else 'No Reason'
+                    # 1. Extract Situation Data
+                    snapshot = decision.get('snapshot', {})
+                    rsi = snapshot.get('rsi', '--')
+                    h1 = MTF_CONTEXT.get('h1', 'UNK')
+                    
                     votes = decision.get('reason', '').replace('\n', ' ')
+                    
+                    # 2. Log based on Context
                     if trade_context:
-                         dash_log(account_id, f"👀 MONITOR: PnL {trade_context['current_pnl']} | Council: {votes}")
+                         # MONITORING: Show PnL + Price
+                         dash_log(account_id, f"👀 MONITOR: PnL {trade_context['current_pnl']} | Price {ask_price} | {votes}")
                     else:
-                         dash_log(account_id, f"🧠 THINKING: {votes}")
+                         # THINKING: Show Situation (RSI + Trend)
+                         # This tells you WHY they are holding (e.g., "RSI is 55" = Neutral)
+                         dash_log(account_id, f"🧠 THINKING: Price {ask_price} | RSI {rsi} | H1 {h1} | {votes}")
+                    
                     last_verbose_log = time.time()
 
                 # --- OPTIMIZED UPDATE: NO H1/M15 HERE ---
@@ -250,8 +273,8 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
                         # 1. HARD STOP LOSS (The Fix)
                         # If we lose more than $15 (or your limit), CLOSE IMMEDIATELY.
                         # We do NOT care what the Council says.
-                        if pnl < -15.00: 
-                            dash_log(account_id, f"🛑 HARD STOP: PnL is {pnl}. Closing to prevent disaster.")
+                        if pnl < -9.00: 
+                            dash_log(account_id, f"🛑 HARD STOP: PnL is {pnl}. Closing early to save cash.")
                             if close_current_trade(driver, dash_log, account_id):
                                 smart_sleep(2)
                                 continue
@@ -279,16 +302,27 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
                         
                         # --- 1. CONVERSION LOGIC (Price Gap -> Pips) ---
                         current_p = float(ask_price)
-                        sl_level = float(decision['sl'])
-                        tp_level = float(decision['tp'])
-                        
-                        # Calculate the Dollar Gap (e.g., $7.50)
+                        # SAFEGUARD: If AI sends 0 or fails, fallback to current price
+                        sl_level = float(decision.get('sl') or current_p)
+                        tp_level = float(decision.get('tp') or current_p)
+
+                        # Calculate the Dollar Gap
                         raw_sl_gap = abs(current_p - sl_level)
                         raw_tp_gap = abs(current_p - tp_level)
-                        
-                        # CONVERT TO PIPS (Critical for Gold)
-                        # Standard XAUUSD: $1.00 move = 10 Pips (usually)
-                        # If Broker wants "75" for a $7.50 move, we multiply by 10.
+
+                        # === SANITY CLAMP (THE FIX) ===
+                        # If Gap is > $20 (crazy), clamp it to $5.00
+                        if raw_sl_gap > 30.0 or raw_sl_gap == 0:
+                            dash_log(account_id, f"⚠️ AI SL Missing/Crazy. Defaulting to $15.00 (150 Pips).")
+                            raw_sl_gap = 15.0  # <--- CHANGE THIS (Was 5.0)
+
+                        # TP Clamp (Keep this generous, e.g., $20)
+                        if raw_tp_gap > 50.0 or raw_tp_gap == 0:
+                            dash_log(account_id, f"⚠️ AI TP Missing/Crazy. Defaulting to $20.00 (200 Pips).")
+                            raw_tp_gap = 20.0
+                        # ==============================
+
+                        # CONVERT TO PIPS
                         sl_pips = round(raw_sl_gap * 10, 1) 
                         tp_pips = round(raw_tp_gap * 10, 1)
                         # ---------------------------------------------

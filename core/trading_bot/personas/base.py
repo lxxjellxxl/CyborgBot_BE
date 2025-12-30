@@ -20,10 +20,13 @@ class BasePersona:
         self.name = name
 
     def get_role_prompt(self):
+        # This will be overwritten by Analyst/Wise/Reckless
         return "You are a trader."
 
     def analyze(self, market_context, chart_data):
         role = self.get_role_prompt()
+        
+        # === GENERIC ENGINE LOGIC ===
         
         full_prompt = f"""
         {role}
@@ -31,13 +34,16 @@ class BasePersona:
         MARKET CONTEXT:
         {market_context}
         
-        RECENT CANDLES:
-        {chart_data[-5:]}
+        RECENT CANDLES (Oldest to Newest):
+        {chart_data}
         
         TASK:
         Decide IMMEDIATE action.
         CRITICAL: RESPONSE MUST BE VALID JSON ONLY. NO MARKDOWN. NO TEXT.
-        FORMAT: {{"action": "BUY" | "SELL" | "HOLD", "reason": "Max 5 words"}}
+        FORMAT: {{"action": "BUY" | "SELL" | "HOLD", "sl": 1234.56, "tp": 1234.56, "reason": "Max 5 words"}}
+        
+        * IMPORTANT: You MUST provide 'sl' (Stop Loss) and 'tp' (Take Profit) prices if you vote BUY or SELL.
+        * If HOLD, set sl and tp to 0.
         """
         
         try:
@@ -46,32 +52,26 @@ class BasePersona:
                 contents=full_prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.5,
-                    response_mime_type="application/json"  # FORCE JSON MODE
+                    response_mime_type="application/json"
                 ) 
             )
             text = response.text.strip()
             
-            # --- ROBUST PARSING (THE FIX) ---
+            # --- ROBUST PARSING ---
             try:
-                # 1. Try direct parse
                 return json.loads(text)
             except:
-                # 2. Try cleaning code blocks
                 if "```" in text:
                     text = text.split("```json")[-1].split("```")[0].strip()
                 
-                # 3. Regex Search for JSON object {...}
                 match = re.search(r'\{.*\}', text, re.DOTALL)
                 if match:
                     return json.loads(match.group())
                 
-                # 4. Fallback: Keyword search if JSON fails
-                text_upper = text.upper()
-                if "BUY" in text_upper: return {"action": "BUY", "reason": "Fallback Parse"}
-                if "SELL" in text_upper: return {"action": "SELL", "reason": "Fallback Parse"}
-                
-                return {"action": "HOLD", "reason": "Parse Error"}
+                # FALLBACK: If JSON fails, HOLD (Do not guess)
+                print(f"[{self.name}] ⚠️ JSON Parse Failed. Raw: {text[:20]}...")
+                return {"action": "HOLD", "reason": "JSON Error", "sl": 0, "tp": 0}
 
         except Exception as e:
             print(f"[{self.name}] Analysis Error: {e}")
-            return {"action": "HOLD", "reason": "API Error"}
+            return {"action": "HOLD", "reason": "API Error", "sl": 0, "tp": 0}

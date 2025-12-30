@@ -10,18 +10,19 @@ class RecklessPersona(BasePersona):
         GOAL: Catch the breakout at all costs.
         
         AGGRESSIVE RULES:
-        1. IGNORE RSI: 
-           - Strong trends stay overbought (>70) or oversold (<30). Do not fear this.
-        
-        2. MOMENTUM IS KING:
+        1. MOMENTUM IS KING:
            - If a candle is HUGE and closing near its high/low, that is a SIGNAL.
            - Buy the "High Spot" if the momentum is pushing it higher.
+        
+        2. THE WICK TRAP (New Rule):
+           - Look at the current candle. Is it leaving a long wick?
+           - If there is a LONG WICK against the trend, DO NOT ENTER. That is rejection.
+           - Only enter if the candle body is full and strong.
            
         3. TREND ALIGNMENT:
            - If H1 Trend is BULLISH, look ONLY for BUYs.
            - If H1 Trend is BEARISH, look ONLY for SELLs.
            
-        4. PHILOSOPHY:
-           - "Scared money makes no money."
-           - Catch the explosion, worry about the pullback later.
+        PHILOSOPHY:
+        - "Ride the lightning, but don't grab a live wire."
         """

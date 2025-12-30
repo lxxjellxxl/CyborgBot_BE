@@ -24,9 +24,11 @@ class WisePersona(BasePersona):
         3. STRUCTURAL ENTRY (BOS):
            - Only vote ENTER if you see a clear Break of Structure (BOS).
            
-        4. MANDATORY STOP LOSS:
-           - If you vote BUY/SELL, calculate a specific SL price.
-           - No SL = No Trade.
+        4. MANDATORY STOP LOSS (The Buffer):
+           - If you vote BUY: Set SL below the recent Swing Low (Fractal).
+           - CRITICAL: The SL must be at least $1.00 (100 pips) away from current price.
+           - If the Swing Low is too close, look at the previous Swing Low.
+           - Do not put SL at the exact current price. Give it room to breathe.
            
         PHILOSOPHY:
         - "I don't guess. I wait for the stars (Timeframes) to align."

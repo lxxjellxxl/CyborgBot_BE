@@ -84,47 +84,66 @@ def detect_macro_patterns(df):
     return patterns
 
 # --- 3. MAIN BRAIN ---
-def apply_emergency_break(db_trade, current_price):
+def apply_emergency_break(trade, current_price):
     """
-    Calculates if SL needs to move to Break Even or Trail.
-    Includes 'Step Logic' to prevent spamming the broker.
+    1. BREAK EVEN: If profit > $2.00, move SL to Entry Price.
+    2. TRAILING: If profit > $5.00, trail price by $1.50.
     """
     try:
-        entry = float(db_trade.open_price or 0)
-        curr = float(current_price)
-        sl = float(db_trade.sl or 0)
-        direction = db_trade.trade_type 
+        current_p = float(current_price)
+        entry_p = float(trade.entry_price)
+        sl_p = float(trade.sl) if trade.sl else 0.0
         
-        if entry == 0: return None
-        
-        # Profit per unit
-        profit = (curr - entry) if direction == "BUY" else (entry - curr)
-        
-        # A. BREAK EVEN (at +$1.00 profit)
-        if profit >= 1.00:
-            # Move to Entry +/- 0.10 buffer
-            be_level = entry + 0.10 if direction == "BUY" else entry - 0.10
+        # Calculate PnL (Dollars per 0.01 lot)
+        if trade.trade_type == "BUY":
+            profit = current_p - entry_p
+        else:
+            profit = entry_p - current_p
             
-            # Only update if new SL is better
-            is_better = (be_level > sl) if direction == "BUY" else ((sl == 0) or (be_level < sl))
-            if is_better:
-                return {"sl": round(be_level, 2), "ticket": db_trade.ticket_id}
-                
-        # B. TRAILING STOP (at +$3.00 profit)
-        if profit >= 3.00:
-            # Trail $1.50 behind price
-            trail_level = curr - 1.50 if direction == "BUY" else curr + 1.50
+        new_sl = None
+
+        # --- RULE 1: SECURE THE WIN (Break Even) ---
+        # If we are winning by at least $2.00...
+        if profit > 2.00:
+            if trade.trade_type == "BUY":
+                # Move SL to Entry + $0.20 (Cover fees)
+                desired_sl = entry_p + 0.20
+                # Only move if current SL is BELOW this level
+                if sl_p < desired_sl:
+                    new_sl = desired_sl
+            else:
+                # Move SL to Entry - $0.20
+                desired_sl = entry_p - 0.20
+                # Only move if current SL is ABOVE this level (or 0)
+                if sl_p == 0 or sl_p > desired_sl:
+                    new_sl = desired_sl
+
+        # --- RULE 2: LOCK IN BIG PROFITS (Trailing) ---
+        # If we are mooning (Profit > $5.00)...
+        if profit > 5.00:
+            if trade.trade_type == "BUY":
+                # Trail by $1.50
+                trail_sl = current_p - 1.50
+                if trail_sl > sl_p: # Always move UP
+                    new_sl = trail_sl
+            else:
+                trail_sl = current_p + 1.50
+                if sl_p == 0 or trail_sl < sl_p: # Always move DOWN
+                    new_sl = trail_sl
+
+        # Return the signal ONLY if we found a better SL
+        if new_sl:
+            return {
+                "ticket": trade.ticket_id,
+                "sl": round(new_sl, 2),
+                "tp": trade.tp # Don't touch TP
+            }
             
-            # Anti-Spam: Only update if change is > $0.10
-            step = 0.10
-            is_significant = (trail_level > (sl + step)) if direction == "BUY" else ((sl == 0) or (trail_level < (sl - step)))
-            
-            if is_significant:
-                return {"sl": round(trail_level, 2), "ticket": db_trade.ticket_id}
-                
-    except Exception as e: 
-        print(f"Brain Error: {e}")
-    return None
+        return None
+
+    except Exception as e:
+        print(f"Manager Error: {e}")
+        return None
 
 # --- 2. MATH HELPER (Calculates RSI/BB for Personas) ---
 def get_technical_summary(candles):

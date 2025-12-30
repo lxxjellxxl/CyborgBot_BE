@@ -299,48 +299,47 @@ def start_trading_loop(driver, account_id, stop_check_func, log_func):
                 if not is_open and ask_price != "0.00":
                     if decision['action'] in ["BUY", "SELL"]:
                         
-                        # --- 1. CONVERSION LOGIC (Price Gap -> Pips) ---
                         current_p = float(ask_price)
-                        # SAFEGUARD: If AI sends 0 or fails, fallback to current price
-                        sl_level = float(decision.get('sl') or current_p)
-                        tp_level = float(decision.get('tp') or current_p)
+                        sl_level = float(decision.get('sl') or 0)
+                        tp_level = float(decision.get('tp') or 0)
 
-                        # Calculate the Dollar Gap
+                        # 1. ABORT if AI is totally lost (0)
+                        if sl_level == 0:
+                            dash_log(account_id, "🛑 BLOCKED: AI failed to calculate SL.")
+                            smart_sleep(2)
+                            continue
+
+                        # 2. Calculate Gap ($)
                         raw_sl_gap = abs(current_p - sl_level)
                         raw_tp_gap = abs(current_p - tp_level)
 
-                        # === SANITY CLAMP (THE FIX) ===
-                        # If Gap is > $20 (crazy), clamp it to $5.00
-                        if raw_sl_gap > 30.0 or raw_sl_gap == 0:
-                            dash_log(account_id, f"⚠️ AI SL Missing/Crazy. Defaulting to $15.00 (150 Pips).")
-                            raw_sl_gap = 15.0  # <--- CHANGE THIS (Was 5.0)
+                        # === THE FIX: FORCE MINIMUM $15.00 ===
+                        # If the AI calculates a tight stop (e.g. $2.00), we widen it.
+                        # We give the trade room to breathe.
+                        MIN_SL_GAP = 15.00 
+                        
+                        if raw_sl_gap < MIN_SL_GAP:
+                            dash_log(account_id, f"⚠️ AI SL too tight (${raw_sl_gap:.2f}). Widening to ${MIN_SL_GAP} (Safety).")
+                            raw_sl_gap = MIN_SL_GAP
 
-                        # TP Clamp (Keep this generous, e.g., $20)
-                        if raw_tp_gap > 50.0 or raw_tp_gap == 0:
-                            dash_log(account_id, f"⚠️ AI TP Missing/Crazy. Defaulting to $20.00 (200 Pips).")
-                            raw_tp_gap = 20.0
-                        # ==============================
+                        # 3. Sanity Clamp (Max Limit)
+                        # If AI wants > $30, that's too much risk. Clamp to $20.
+                        if raw_sl_gap > 30.0:
+                            dash_log(account_id, f"⚠️ AI SL huge (${raw_sl_gap:.2f}). Capping at $20.00.")
+                            raw_sl_gap = 20.0
 
-                        # CONVERT TO PIPS
+                        # 4. Convert to Pips (Gold: $1 = 10 Pips)
                         sl_pips = round(raw_sl_gap * 10, 1) 
                         tp_pips = round(raw_tp_gap * 10, 1)
-                        # ---------------------------------------------
 
-                        dash_log(account_id, f"⚡ ATTEMPTING {decision['action']} | Gap: ${round(raw_sl_gap, 2)} -> Sending {sl_pips} Pips")
+                        dash_log(account_id, f"⚡ ATTEMPTING {decision['action']} | Gap: ${raw_sl_gap:.2f} | Sending {sl_pips} Pips SL")
                         
                         if navigate_order_panel_to_gold(driver, account_id, dash_log):
-                            # Pass the calculated PIPS (e.g., 75) not the GAP (7.5)
                             if place_market_order(driver, decision['action'], sl_pips, tp_pips, dash_log, account_id):
-                                
-                                # --- 2. PREVENT SPAM (The Machine Gun Fix) ---
-                                # Force the bot to wait 5 seconds for the table to update
-                                dash_log(account_id, "✅ Trade Sent. Waiting for broker to update...")
+                                dash_log(account_id, "✅ Trade Sent. Waiting for broker...")
                                 time.sleep(5) 
-                                
-                                # Manually flag as open so we don't buy again in the next split second
                                 active_trades_ui = [{"temp": "true"}] 
                                 
-                                # Save to DB
                                 voters = decision.get('voters', [])
                                 voters_str = ",".join(voters) if isinstance(voters, list) else str(voters)
                                 save_trade_to_db(account_id, decision['action'], ask_price, decision['sl'], decision['tp'], decision['reason'], voters_str, MTF_CONTEXT)

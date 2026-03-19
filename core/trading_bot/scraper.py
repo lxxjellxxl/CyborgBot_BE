@@ -5,7 +5,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # --- GLOBAL CONTEXT & CACHE ---
-MTF_CONTEXT = { "h1": "UNKNOWN", "m15": "UNKNOWN", "m5": "UNKNOWN" }
+# Added 'strategy' default
+MTF_CONTEXT = { "h1": "UNKNOWN", "m15": "UNKNOWN", "m5": "UNKNOWN", "strategy": "NORMAL" }
 CANDLE_CACHE = [] 
 
 # --- 1. MACD & MATH CALCULATION (YOUR CODE) ---

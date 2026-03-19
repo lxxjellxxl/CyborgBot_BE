@@ -41,6 +41,8 @@ class TradePosition(models.Model):
     
     open_price = models.DecimalField(max_digits=12, decimal_places=5)
     close_price = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    sl = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
+    tp = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True)
     sl_pips = models.IntegerField(default=100)
     tp_pips = models.IntegerField(default=300)
     profit = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)

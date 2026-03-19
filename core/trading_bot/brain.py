@@ -1,3 +1,5 @@
+import json
+import os
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -15,341 +17,503 @@ reckless = RecklessPersona()
 analyst = AnalystPersona()
 wise = WisePersona()
 
-# --- 1. HELPER: MICRO PATTERNS (1-2 Candles) ---
-def detect_micro_patterns(df):
-    patterns = []
+# Helper function to read DXY data
+def get_dxy_from_file():
+    """Read latest DXY data from the background service"""
+    dxy_file = 'dxy_latest.json'
+    default_data = {
+        'price': 100.0,
+        'change_percent': 0,
+        'strength': False,
+        'weakness': False,
+        'timestamp': None
+    }
+    
     try:
-        c = df.iloc[-1]; p = df.iloc[-2]
-        body = abs(c['close'] - c['open'])
-        full_range = c['high'] - c['low']
-        lower_wick = min(c['close'], c['open']) - c['low']
-        upper_wick = c['high'] - max(c['close'], c['open'])
+        if os.path.exists(dxy_file):
+            with open(dxy_file, 'r') as f:
+                data = json.load(f)
+                return data
+    except Exception as e:
+        print(f"Error reading DXY file: {e}")
+    
+    return default_data
 
-        if full_range == 0: return []
-
-        # Engulfing
-        if (p['close'] < p['open']) and (c['close'] > c['open']) and (c['close'] > p['open']) and (c['open'] < p['close']):
-            patterns.append("BULLISH_ENGULFING")
-        if (p['close'] > p['open']) and (c['close'] < c['open']) and (c['open'] > p['close']) and (c['close'] < p['open']):
-            patterns.append("BEARISH_ENGULFING")
+# --- 1. VWAP CALCULATION ---
+def calculate_vwap(df):
+    """Calculate VWAP (Volume Weighted Average Price)"""
+    try:
+        if df is None or len(df) < 10:
+            return None
             
-        # Pin Bars (Hammers/Shooting Stars) - CRITICAL FOR REVERSALS
-        if (lower_wick > body * 2) and (upper_wick < body):
-            patterns.append("HAMMER_BUY")
-        if (upper_wick > body * 2) and (lower_wick < body):
-            patterns.append("SHOOTING_STAR_SELL")
-
-    except: pass
-    return patterns
-
-# --- 2. HELPER: MACRO PATTERNS (M, W, H&S) ---
-def detect_macro_patterns(df):
-    """
-    Scans the last 50 candles to find M (Double Top), W (Double Bottom).
-    """
-    patterns = []
-    try:
-        if len(df) < 30: return []
-
-        # Simple Peak Detection
-        df['is_peak'] = df.iloc[2:-2]['high'].apply(
-            lambda x: x == df['high'].rolling(window=5, center=True).max().loc[df.index[df['high'] == x][0]]
-        )
-        peaks = []   
-        valleys = [] 
+        df['typical'] = (df['high'] + df['low'] + df['close']) / 3
+        df['vp'] = df['typical'] * df['volume']
         
-        subset = df.iloc[-40:].reset_index()
-        for i in range(2, len(subset) - 2):
-            curr = subset.iloc[i]
-            prev = subset.iloc[i-1]; next_c = subset.iloc[i+1]
+        df['cum_vp'] = df['vp'].cumsum()
+        df['cum_vol'] = df['volume'].cumsum()
+        
+        vwap = df['cum_vp'] / df['cum_vol']
+        latest_vwap = vwap.iloc[-1]
+        
+        if pd.isna(latest_vwap):
+            return None
+        return float(latest_vwap)
+    except:
+        return None
+
+
+
+# --- 2. LIQUIDITY LEVELS (Recent Highs/Lows) ---
+def detect_liquidity_levels(df, lookback=30):
+    """Find liquidity levels (recent highs and lows)"""
+    try:
+        recent_high = df['high'].tail(lookback).max()
+        recent_low = df['low'].tail(lookback).min()
+        
+        # Check if they're valid numbers
+        if pd.isna(recent_high) or pd.isna(recent_low):
+            return {
+                'high': None, 'low': None, 
+                'swept_high': False, 'swept_low': False,
+                'is_premium': False, 'is_discount': False
+            }
+        
+        current_close = float(df['close'].iloc[-1])
+        prev_close = float(df['close'].iloc[-2])
+        
+        liquidity_swept_high = current_close > recent_high and prev_close <= recent_high
+        liquidity_swept_low = current_close < recent_low and prev_close >= recent_low
+        
+        # Calculate VWAP safely
+        vwap_val = calculate_vwap(df)
+        is_premium = vwap_val is not None and current_close > vwap_val
+        is_discount = vwap_val is not None and current_close < vwap_val
+        
+        return {
+            'high': float(recent_high),
+            'low': float(recent_low),
+            'swept_high': liquidity_swept_high,
+            'swept_low': liquidity_swept_low,
+            'is_premium': is_premium,
+            'is_discount': is_discount
+        }
+    except Exception as e:
+        print(f"Liquidity error: {e}")
+        return {
+            'high': None, 'low': None, 
+            'swept_high': False, 'swept_low': False,
+            'is_premium': False, 'is_discount': False
+        }
+
+# --- 3. VOLUME PROFILE (POC, Value Area) ---
+def calculate_volume_profile(df, bins=25):
+    """Calculate Point of Control and Value Area"""
+    try:
+        if len(df) < 20:
+            return {'poc': None, 'va_high': None, 'va_low': None}
+        
+        highest = df['high'].max()
+        lowest = df['low'].min()
+        
+        # Check if highest/lowest are valid
+        if pd.isna(highest) or pd.isna(lowest):
+            return {'poc': None, 'va_high': None, 'va_low': None, 
+                    'extreme_bullish': False, 'extreme_bearish': False, 'inside_va': False}
+        
+        price_range = highest - lowest
+        if price_range <= 0:
+            return {'poc': None, 'va_high': None, 'va_low': None, 
+                    'extreme_bullish': False, 'extreme_bearish': False, 'inside_va': False}
+        
+        bin_size = price_range / bins
+        
+        # Initialize price levels and volume at price
+        price_levels = []
+        volume_at_price = []
+        
+        for i in range(bins):
+            price_levels.append(lowest + (i * bin_size) + (bin_size / 2))
+            volume_at_price.append(0.0)
+        
+        # Accumulate volume
+        for i in range(len(df)):
+            bar_low = df['low'].iloc[i]
+            bar_high = df['high'].iloc[i]
+            bar_volume = df['volume'].iloc[i]
+            bar_close = df['close'].iloc[i]
             
-            if curr['high'] > prev['high'] and curr['high'] > next_c['high']:
-                peaks.append((i, curr['high']))
-            if curr['low'] < prev['low'] and curr['low'] < next_c['low']:
-                valleys.append((i, curr['low']))
+            # Skip if any value is invalid
+            if pd.isna(bar_low) or pd.isna(bar_high) or pd.isna(bar_volume) or pd.isna(bar_close):
+                continue
+                
+            for j in range(bins):
+                if price_levels[j] >= bar_low and price_levels[j] <= bar_high:
+                    closeness = 1 - abs(price_levels[j] - bar_close) / price_range
+                    volume_at_price[j] += bar_volume * closeness
+        
+        # Find POC (highest volume)
+        max_volume = max(volume_at_price)
+        if max_volume <= 0:
+            return {'poc': None, 'va_high': None, 'va_low': None, 
+                    'extreme_bullish': False, 'extreme_bearish': False, 'inside_va': False}
+        
+        poc_idx = volume_at_price.index(max_volume)
+        poc = price_levels[poc_idx]
+        
+        # Find Value Area (70% of volume)
+        total_volume = sum(volume_at_price)
+        if total_volume <= 0:
+            return {'poc': poc, 'va_high': poc, 'va_low': poc, 
+                    'extreme_bullish': False, 'extreme_bearish': False, 'inside_va': True}
+        
+        target_volume = total_volume * 0.7
+        
+        # Sort by volume
+        sorted_indices = sorted(range(bins), key=lambda i: volume_at_price[i], reverse=True)
+        
+        # Build value area
+        va_volume = 0
+        va_levels = []
+        for idx in sorted_indices:
+            if va_volume >= target_volume:
+                break
+            va_volume += volume_at_price[idx]
+            va_levels.append(price_levels[idx])
+        
+        va_high = max(va_levels) if va_levels else poc
+        va_low = min(va_levels) if va_levels else poc
+        
+        current_price = float(df['close'].iloc[-1])
+        
+        # SAFE COMPARISONS with null checks
+        extreme_bullish = va_low is not None and current_price < va_low
+        extreme_bearish = va_high is not None and current_price > va_high
+        inside_va = (va_low is not None and va_high is not None and 
+                     va_low <= current_price <= va_high)
+        
+        return {
+            'poc': poc,
+            'va_high': va_high,
+            'va_low': va_low,
+            'extreme_bullish': extreme_bullish,
+            'extreme_bearish': extreme_bearish,
+            'inside_va': inside_va
+        }
+    except Exception as e:
+        print(f"Volume profile error: {e}")
+        return {'poc': None, 'va_high': None, 'va_low': None, 
+                'extreme_bullish': False, 'extreme_bearish': False, 'inside_va': False}
 
-        # Double Top (M)
-        if len(peaks) >= 2:
-            p1 = peaks[-2]; p2 = peaks[-1]
-            if abs(p1[1] - p2[1]) / p1[1] < 0.001:
-                patterns.append("DOUBLE_TOP_M_SELL")
 
-        # Double Bottom (W)
-        if len(valleys) >= 2:
-            v1 = valleys[-2]; v2 = valleys[-1]
-            if abs(v1[1] - v2[1]) / v1[1] < 0.001:
-                patterns.append("DOUBLE_BOTTOM_W_BUY")
+# --- 4. EMA TREND FILTER ---
+def calculate_ema_trend(df, fast=9, slow=21):
+    """Calculate EMA trend alignment"""
+    try:
+        df['ema_fast'] = ta.ema(df['close'], length=fast)
+        df['ema_slow'] = ta.ema(df['close'], length=slow)
+        
+        # EMA alignment
+        bullish_alignment = df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1]
+        bearish_alignment = df['ema_fast'].iloc[-1] < df['ema_slow'].iloc[-1]
+        
+        # Price position relative to EMAs
+        current_price = df['close'].iloc[-1]
+        price_above_ema = current_price > df['ema_fast'].iloc[-1] and current_price > df['ema_slow'].iloc[-1]
+        price_below_ema = current_price < df['ema_fast'].iloc[-1] and current_price < df['ema_slow'].iloc[-1]
+        
+        return {
+            'bullish': bullish_alignment,
+            'bearish': bearish_alignment,
+            'price_above': price_above_ema,
+            'price_below': price_below_ema,
+            'fast': df['ema_fast'].iloc[-1],
+            'slow': df['ema_slow'].iloc[-1]
+        }
+    except:
+        return {'bullish': False, 'bearish': False, 'price_above': False, 'price_below': False}
 
-    except: pass
-    return patterns
+# --- 5. DELTA FLOW (Buying/Selling Pressure) ---
+def calculate_delta_flow(df):
+    """Calculate delta and momentum"""
+    try:
+        # Delta = ((close - open) / (high - low)) * volume
+        df['delta'] = ((df['close'] - df['open']) / (df['high'] - df['low']).replace(0, 1)) * df['volume']
+        df['delta_ma'] = ta.sma(df['delta'].abs(), length=20)
+        
+        # Delta status
+        latest_delta = df['delta'].iloc[-1]
+        latest_delta_ma = df['delta_ma'].iloc[-1]
+        
+        if latest_delta > latest_delta_ma:
+            delta_status = "STRONG_BUYING"
+        elif latest_delta < -latest_delta_ma:
+            delta_status = "STRONG_SELLING"
+        else:
+            delta_status = "NEUTRAL"
+        
+        # Delta momentum
+        if len(df) >= 5:
+            delta_momentum = df['delta'].iloc[-1] - df['delta'].iloc[-5]
+        else:
+            delta_momentum = 0
+        
+        return {
+            'delta': latest_delta,
+            'delta_ma': latest_delta_ma,
+            'status': delta_status,
+            'momentum': delta_momentum,
+            'is_big_buying': latest_delta > latest_delta_ma * 1.8,
+            'is_big_selling': latest_delta < -latest_delta_ma * 1.8
+        }
+    except:
+        return {'status': 'NEUTRAL', 'momentum': 0, 'is_big_buying': False, 'is_big_selling': False}
 
-# --- 3. MAIN BRAIN ---
+# --- 6. VOLUME SPIKE DETECTION ---
+def detect_volume_spike(df):
+    """Check if current volume is significantly above average"""
+    try:
+        df['volume_ma'] = ta.sma(df['volume'], length=20)
+        latest_volume = df['volume'].iloc[-1]
+        latest_ma = df['volume_ma'].iloc[-1]
+        
+        return {
+            'is_big': latest_volume > latest_ma * 1.5,
+            'is_huge': latest_volume > latest_ma * 2.5,
+            'ratio': latest_volume / latest_ma if latest_ma > 0 else 1
+        }
+    except:
+        return {'is_big': False, 'is_huge': False, 'ratio': 1}
+
+# --- 7. MAIN DECISION ENGINE ---
+def get_market_decision(price, context, candles, history, active_trade=None):
+    try:
+        if not candles or len(candles) < 30:
+            return {'action': 'HOLD', 'sl': 0, 'tp': 0, 'reason': 'Insufficient data'}
+
+        # Create DataFrame
+        df = pd.DataFrame(candles)
+        df.columns = [c.lower() for c in df.columns]
+        
+        # Get DXY data
+        dxy = get_dxy_from_file()
+        
+        # --- CALCULATE ALL COMPONENTS WITH DEBUG ---
+        try:
+            vwap = calculate_vwap(df)
+            print(f"DEBUG - VWAP: {vwap}")
+        except Exception as e:
+            print(f"DEBUG - VWAP ERROR: {e}")
+            vwap = None
+        
+        try:
+            liquidity = detect_liquidity_levels(df, lookback=30)
+            print(f"DEBUG - LIQUIDITY: {liquidity}")
+        except Exception as e:
+            print(f"DEBUG - LIQUIDITY ERROR: {e}")
+            liquidity = {'high': None, 'low': None, 'swept_high': False, 'swept_low': False, 'is_premium': False, 'is_discount': False}
+        
+        try:
+            volume_profile = calculate_volume_profile(df)
+            print(f"DEBUG - VOLUME PROFILE: {volume_profile}")
+        except Exception as e:
+            print(f"DEBUG - VOLUME PROFILE ERROR: {e}")
+            volume_profile = {'poc': None, 'va_high': None, 'va_low': None, 'extreme_bullish': False, 'extreme_bearish': False, 'inside_va': False}
+        
+        try:
+            ema_trend = calculate_ema_trend(df)
+            print(f"DEBUG - EMA TREND: {ema_trend}")
+        except Exception as e:
+            print(f"DEBUG - EMA ERROR: {e}")
+            ema_trend = {'bullish': False, 'bearish': False, 'price_above': False, 'price_below': False}
+        
+        try:
+            delta = calculate_delta_flow(df)
+            print(f"DEBUG - DELTA: {delta}")
+        except Exception as e:
+            print(f"DEBUG - DELTA ERROR: {e}")
+            delta = {'status': 'NEUTRAL', 'momentum': 0, 'is_big_buying': False, 'is_big_selling': False}
+        
+        try:
+            volume_spike = detect_volume_spike(df)
+            print(f"DEBUG - VOLUME SPIKE: {volume_spike}")
+        except Exception as e:
+            print(f"DEBUG - VOLUME SPIKE ERROR: {e}")
+            volume_spike = {'is_big': False, 'is_huge': False, 'ratio': 1}
+        
+        try:
+            atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1] if len(df) > 14 else 1.0
+            print(f"DEBUG - ATR: {atr}")
+        except Exception as e:
+            print(f"DEBUG - ATR ERROR: {e}")
+            atr = 1.0
+        
+        # --- DETERMINE SIGNAL TYPES ---
+        price_f = float(price)
+        
+        # VWAP Bias with null check
+        is_premium = vwap is not None and price_f > vwap
+        is_discount = vwap is not None and price_f < vwap
+        
+        # DXY conditions
+        dxy_weakness = dxy.get('weakness', False)
+        dxy_strength = dxy.get('strength', False)
+        
+        # Volume conditions
+        is_volume_big = volume_spike['is_big']
+        is_big_order = volume_spike['is_huge']
+        
+        # Delta conditions
+        delta_big_buying = delta['is_big_buying']
+        delta_big_selling = delta['is_big_selling']
+        
+        # Signal detection
+        perfect_sweep_buy = liquidity['swept_low'] and is_discount and dxy_weakness and is_volume_big
+        perfect_sweep_sell = liquidity['swept_high'] and is_premium and dxy_strength and is_volume_big
+        
+        perfect_scalp_buy = is_discount and dxy_weakness and is_volume_big and not liquidity['swept_low']
+        perfect_scalp_sell = is_premium and dxy_strength and is_volume_big and not liquidity['swept_high']
+        
+        # Volume profile boosted signals
+        vp_boosted_buy = (perfect_sweep_buy or perfect_scalp_buy) and volume_profile['extreme_bullish']
+        vp_boosted_sell = (perfect_sweep_sell or perfect_scalp_sell) and volume_profile['extreme_bearish']
+        
+        # Premium signals
+        premium_buy = perfect_sweep_buy and volume_profile['extreme_bullish']
+        premium_sell = perfect_sweep_sell and volume_profile['extreme_bearish']
+        
+        # --- SIGNAL HIERARCHY ---
+        if premium_buy:
+            action = "BUY"
+            signal_type = "💎 PREMIUM BUY"
+            confidence = 95
+        elif premium_sell:
+            action = "SELL"
+            signal_type = "💎 PREMIUM SELL"
+            confidence = 95
+        elif vp_boosted_buy:
+            action = "BUY"
+            signal_type = "⚡ BOOSTED BUY"
+            confidence = 85
+        elif vp_boosted_sell:
+            action = "SELL"
+            signal_type = "⚡ BOOSTED SELL"
+            confidence = 85
+        elif perfect_sweep_buy:
+            action = "BUY"
+            signal_type = "🔥 SWEEP BUY"
+            confidence = 80
+        elif perfect_sweep_sell:
+            action = "SELL"
+            signal_type = "🔥 SWEEP SELL"
+            confidence = 80
+        elif perfect_scalp_buy:
+            action = "BUY"
+            signal_type = "✨ SCALP BUY"
+            confidence = 75
+        elif perfect_scalp_sell:
+            action = "SELL"
+            signal_type = "✨ SCALP SELL"
+            confidence = 75
+        else:
+            action = "HOLD"
+            signal_type = "WAIT"
+            confidence = 0
+        
+        # --- DYNAMIC SL/TP ---
+        if action != "HOLD":
+            sl_distance = atr * (1.5 if confidence >= 90 else 2.0)
+            tp_distance = atr * (3.0 if confidence >= 90 else 4.0)
+            
+            if action == "BUY":
+                sl = round(price_f - sl_distance, 2)
+                tp = round(price_f + tp_distance, 2)
+            else:
+                sl = round(price_f + sl_distance, 2)
+                tp = round(price_f - tp_distance, 2)
+        else:
+            sl = 0.0
+            tp = 0.0
+        
+        reason_parts = [
+            f"DXY: {'+' if dxy_strength else '-' if dxy_weakness else '='}{dxy.get('change_percent', 0):.1f}%",
+            f"VP: {'Below' if price_f < volume_profile.get('poc', price_f) else 'Above'}",
+            f"Vol: {volume_spike['ratio']:.1f}x"
+        ]
+        
+        final = {
+            "action": action,
+            "sl": sl,
+            "tp": tp,
+            "reason": f"{signal_type} | " + " | ".join(reason_parts),
+            "voters": [],
+            "confidence": confidence,
+            "snapshot": {
+                "vwap": vwap,
+                "liquidity": liquidity,
+                "volume_profile": volume_profile,
+                "dxy": dxy,
+                "delta": delta['status'],
+                "ema_trend": "BULLISH" if ema_trend['bullish'] else "BEARISH" if ema_trend['bearish'] else "NEUTRAL"
+            }
+        }
+        
+        return final
+        
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        
+        # Log to your dash_log system
+        try:
+            # You need to pass log_func to this function or make it available
+            # For now, we'll return the error in the reason
+            pass
+        except:
+            pass
+        
+        return {
+            "action": "HOLD",
+            "sl": 0.0,
+            "tp": 0.0,
+            "reason": f"ERROR: {str(e)[:50]}",
+            "voters": [],
+            "confidence": 0,
+            "error": error_details  # Add this to see in controller
+        }
+
+
+# --- 8. EMERGENCY BREAK (Keep this) ---
 def apply_emergency_break(trade, current_price):
-    """
-    1. BREAK EVEN: If profit > $2.00, move SL to Entry Price.
-    2. TRAILING: If profit > $5.00, trail price by $1.50.
-    """
     try:
         current_p = float(current_price)
         entry_p = float(trade.entry_price)
         sl_p = float(trade.sl) if trade.sl else 0.0
         
-        # Calculate PnL (Dollars per 0.01 lot)
-        if trade.trade_type == "BUY":
-            profit = current_p - entry_p
-        else:
-            profit = entry_p - current_p
+        if trade.trade_type == "BUY": profit = current_p - entry_p
+        else: profit = entry_p - current_p
             
         new_sl = None
 
-        # --- RULE 1: SECURE THE WIN (Break Even) ---
-        # If we are winning by at least $2.00...
-        if profit > 2.00:
+        # Break even after $1.00 profit
+        if profit > 1.00:
             if trade.trade_type == "BUY":
-                # Move SL to Entry + $0.20 (Cover fees)
-                desired_sl = entry_p + 0.20
-                # Only move if current SL is BELOW this level
-                if sl_p < desired_sl:
-                    new_sl = desired_sl
+                desired_sl = entry_p + 0.40
+                if sl_p < desired_sl: new_sl = desired_sl
             else:
-                # Move SL to Entry - $0.20
-                desired_sl = entry_p - 0.20
-                # Only move if current SL is ABOVE this level (or 0)
-                if sl_p == 0 or sl_p > desired_sl:
-                    new_sl = desired_sl
+                desired_sl = entry_p - 0.40
+                if sl_p == 0 or sl_p > desired_sl: new_sl = desired_sl
 
-        # --- RULE 2: LOCK IN BIG PROFITS (Trailing) ---
-        # If we are mooning (Profit > $5.00)...
-        if profit > 5.00:
+        # Trailing after $3.00 profit
+        if profit > 3.00:
             if trade.trade_type == "BUY":
-                # Trail by $1.50
-                trail_sl = current_p - 1.50
-                if trail_sl > sl_p: # Always move UP
-                    new_sl = trail_sl
+                trail_sl = current_p - 1.00
+                if trail_sl > sl_p: new_sl = trail_sl
             else:
-                trail_sl = current_p + 1.50
-                if sl_p == 0 or trail_sl < sl_p: # Always move DOWN
-                    new_sl = trail_sl
+                trail_sl = current_p + 1.00
+                if sl_p == 0 or trail_sl < sl_p: new_sl = trail_sl
 
-        # Return the signal ONLY if we found a better SL
         if new_sl:
-            return {
-                "ticket": trade.ticket_id,
-                "sl": round(new_sl, 2),
-                "tp": trade.tp # Don't touch TP
-            }
-            
+            return {"ticket": trade.ticket_id, "sl": round(new_sl, 2), "tp": trade.tp}
         return None
-
-    except Exception as e:
-        print(f"Manager Error: {e}")
+    except: 
         return None
-
-# --- 2. MATH HELPER (Calculates RSI/BB for Personas) ---
-def get_technical_summary(candles):
-    """
-    Takes raw candles and returns a dictionary of indicators.
-    This ensures Personas know the RSI and Bollinger values.
-    """
-    try:
-        if not candles: return {}
-        
-        df = pd.DataFrame(candles)
-        # Pandas TA requires lowercase columns
-        df.columns = [c.lower() for c in df.columns] 
-
-        # Calculate Indicators
-        # 
-        df['rsi'] = ta.rsi(df['close'], length=14)
-        bb = ta.bbands(df['close'], length=20, std=2)
-        
-        # Extract last values
-        rsi_val = round(df['rsi'].iloc[-1], 2)
-        
-        # BBands (0=Lower, 1=Mid, 2=Upper)
-        bb_lower = bb.iloc[-1, 0] if bb is not None else 0
-        bb_mid   = bb.iloc[-1, 1] if bb is not None else 0
-        bb_upper = bb.iloc[-1, 2] if bb is not None else 0
-        
-        # Micro Patterns (Engulfing, Hammer)
-        # 
-        patterns = []
-        c = df.iloc[-1]; p = df.iloc[-2]
-        
-        # Bullish Engulfing
-        if (p['close'] < p['open']) and (c['close'] > c['open']) and (c['close'] > p['open']):
-            patterns.append("BULLISH_ENGULFING")
-            
-        return {
-            "rsi": rsi_val,
-            "bb_lower": round(bb_lower, 2),
-            "bb_upper": round(bb_upper, 2),
-            "patterns": ", ".join(patterns)
-        }
-    except Exception as e:
-        return {"rsi": 50, "bb_lower": 0, "bb_upper": 0, "patterns": "Error"}
-
-# --- 3. VOTE SYNTHESIS (The Judge) ---
-def synthesize_votes(votes, context):
-    """
-    Counts votes from Personas and applies H1 Trend Veto.
-    """
-    final_decision = {"action": "HOLD", "sl": 0, "tp": 0, "reason": "", "voters": []}
-    
-    buy_votes = 0; sell_votes = 0
-    reasons = []; sl_values = []; tp_values = []
-    
-    for persona, vote in votes.items():
-        action = vote.get('action', 'HOLD')
-        reasons.append(f"{persona}: {action} ({vote.get('reason', '')})")
-        
-        if action == "BUY":
-            buy_votes += 1
-            if vote.get('sl'): sl_values.append(float(vote['sl']))
-            if vote.get('tp'): tp_values.append(float(vote['tp']))
-            final_decision['voters'].append(persona)
-            
-        elif action == "SELL":
-            sell_votes += 1
-            if vote.get('sl'): sl_values.append(float(vote['sl']))
-            if vote.get('tp'): tp_values.append(float(vote['tp']))
-            final_decision['voters'].append(persona)
-
-    # CONTEXT CHECK: H1 Trend Veto
-    h1_trend = context.get('h1', 'NEUTRAL')
-    
-    if h1_trend == "BEARISH" and buy_votes > 0: 
-        buy_votes = 0; reasons.append("H1 Bearish Veto")
-        
-    if h1_trend == "BULLISH" and sell_votes > 0: 
-        sell_votes = 0; reasons.append("H1 Bullish Veto")
-
-    # DECIDE WINNER (Need 2 votes)
-    if buy_votes >= 2:
-        final_decision["action"] = "BUY"
-        final_decision["sl"] = sum(sl_values)/len(sl_values) if sl_values else 0
-        final_decision["tp"] = sum(tp_values)/len(tp_values) if tp_values else 0
-        
-    elif sell_votes >= 2:
-        final_decision["action"] = "SELL"
-        final_decision["sl"] = sum(sl_values)/len(sl_values) if sl_values else 0
-        final_decision["tp"] = sum(tp_values)/len(tp_values) if tp_values else 0
-        
-    final_decision["reason"] = " | ".join(reasons)
-    return final_decision
-
-# Compatibility Wrapper
-def get_market_decision(price, context, candles, history, active_trade=None):
-    """
-    Calculates Math -> Asks Personas -> Returns Decision.
-    FIXED: Now includes MICRO and MACRO patterns in the snapshot.
-    """
-    # 1. Calculate Technicals (RSI, BB, PATTERNS)
-    try:
-        if not candles or len(candles) < 20:
-            raise ValueError("Not enough candles")
-
-        df = pd.DataFrame(candles)
-        df.columns = [c.lower() for c in df.columns]
-        
-        # A. Indicators
-        df['rsi'] = ta.rsi(df['close'], length=14)
-        bb = ta.bbands(df['close'], length=20, std=2)
-        
-        rsi_val = float(round(df['rsi'].iloc[-1], 2))
-        bb_lower = float(round(bb.iloc[-1, 0], 2)) if bb is not None else 0.0
-        bb_upper = float(round(bb.iloc[-1, 2], 2)) if bb is not None else 0.0
-        
-        # === B. PATTERNS (THE FIX) ===
-        # We must calculate them here so they get sent to the frontend
-        micro_patterns = detect_micro_patterns(df) # e.g. ["BULLISH_ENGULFING"]
-        macro_patterns = detect_macro_patterns(df) # e.g. ["DOUBLE_BOTTOM_W"]
-        # =============================
-
-        # C. Serialize History
-        history_clean = []
-        if history:
-            for h in history:
-                if isinstance(h, dict): history_clean.append(h)
-                else:
-                    history_clean.append({
-                        "ticket": str(h.ticket_id),
-                        "profit": float(h.profit),
-                        "type": str(h.trade_type)
-                    })
-
-        # D. Prepare Snapshot Data
-        tech_data = {
-            "rsi": rsi_val,
-            "bb_lower": bb_lower,
-            "bb_upper": bb_upper,
-            "price": float(price),
-            # === SEND PATTERNS TO FRONTEND ===
-            "patterns": micro_patterns,      # Logic: 1-2 candles
-            "macro_patterns": macro_patterns, # Logic: Chart Shapes (M/W)
-            # =================================
-            "history": history_clean,
-            "active_trade": active_trade
-        }
-    except Exception as e:
-        tech_data = {
-            "rsi": 50.0, "bb_lower": 0.0, "bb_upper": 0.0, "price": float(price),
-            "patterns": [], "macro_patterns": [], "history": [], "error": str(e)
-        }
-
-    # 2. Merge Context
-    full_context = {**context, **tech_data}
-    chart_data = candles[-30:] if candles else []
-
-    # 3. Gather Votes
-    votes = {
-        "RECKLESS": reckless.analyze(full_context, chart_data),
-        "ANALYST": analyst.analyze(full_context, chart_data),
-        "WISE": wise.analyze(full_context, chart_data)
-    }
-
-    # 4. Synthesize (The Judge)
-    final = {"action": "HOLD", "sl": 0.0, "tp": 0.0, "reason": "", "voters": []}
-    
-    buy_votes = 0; sell_votes = 0
-    sls = []; tps = []; reasons = []
-    
-    for p, v in votes.items():
-        act = v.get('action', 'HOLD')
-        reasons.append(f"{p}:{act}")
-        
-        raw_sl = float(v.get('sl', 0) or 0)
-        raw_tp = float(v.get('tp', 0) or 0)
-
-        if act == "BUY": 
-            buy_votes += 1
-            if raw_sl > 0: sls.append(raw_sl)
-            if raw_tp > 0: tps.append(raw_tp)
-        elif act == "SELL": 
-            sell_votes += 1
-            if raw_sl > 0: sls.append(raw_sl)
-            if raw_tp > 0: tps.append(raw_tp)
-
-    # VETO CHECK
-    h1 = context.get('h1', 'NEUTRAL')
-    if h1 == "BEARISH" and buy_votes > 0: 
-        buy_votes = 0; reasons.append("VETO: H1 Bearish")
-    if h1 == "BULLISH" and sell_votes > 0: 
-        sell_votes = 0; reasons.append("VETO: H1 Bullish")
-
-    # WINNER DECISION
-    if buy_votes >= 2:
-        final["action"] = "BUY"
-        final["sl"] = sum(sls)/len(sls) if sls else 0.0
-        final["tp"] = sum(tps)/len(tps) if tps else 0.0
-        final["voters"] = ["COUNCIL_BUY"]
-    elif sell_votes >= 2:
-        final["action"] = "SELL"
-        final["sl"] = sum(sls)/len(sls) if sls else 0.0
-        final["tp"] = sum(tps)/len(tps) if tps else 0.0
-        final["voters"] = ["COUNCIL_SELL"]
-        
-    final["reason"] = " | ".join(reasons)
-    final["snapshot"] = tech_data # The Controller sends this entire object!
-    
-    return final

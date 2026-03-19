@@ -7,12 +7,13 @@ import pytz
 class TradePositionSerializer(serializers.ModelSerializer):
     class Meta:
         model = TradePosition
-        fields = '__all__'
+        fields = '__all__' # Automatically includes 'sl' and 'tp'
 
 class TradingAccountSerializer(serializers.ModelSerializer):
     daily_stats = serializers.SerializerMethodField()
     class Meta:
         model = TradingAccount
+        # Removed 'account_number' because it is missing from your DB model
         fields = ['id', 'name', 'login_id', 'account_type', 'broker', 'is_active', 'balance', 'equity', 'daily_stats']
 
     def get_daily_stats(self, obj):
@@ -47,6 +48,7 @@ class TradingAccountDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TradingAccount
+        # Removed 'account_number' because it is missing from your DB model
         fields = [
             'id', 'name', 'login_id', 'server_name', 'account_type', 
             'broker', 'balance', 'equity', 'is_active', 'last_sync_time',
